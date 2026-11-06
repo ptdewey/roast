@@ -163,7 +163,7 @@ func TestPublicCommandSurface(t *testing.T) {
 	for _, command := range root.Commands() {
 		commands[command.Name()] = true
 	}
-	for _, name := range []string{"config", "doctor", "gate", "review", "runs", "skill"} {
+	for _, name := range []string{"auth", "config", "doctor", "gate", "review", "runs", "skill"} {
 		if !commands[name] {
 			t.Errorf("missing public command %q", name)
 		}

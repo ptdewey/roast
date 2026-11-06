@@ -66,6 +66,155 @@ roast review --task 'add retry handling'
 Both roles default to the OpenAI Responses protocol at
 `https://api.openai.com/v1`.
 
+## Codex subscription (older OAuth flow)
+
+For the older Codex-style subscription login used by tools such as Albedo and Pi,
+select the separate `codex` provider:
+
+```sh
+roast auth login --provider codex
+roast auth status --provider codex
+roast auth models --provider codex
+```
+
+This uses the legacy Codex public OAuth client and its minimal identity/offline
+scopes, not dynamic third-party app registration or the newer **Use ChatGPT plan**
+permission. Requests go directly to the Codex Responses backend; no Codex CLI
+installation or `codex exec` wrapper is needed. Roast keeps its own prompts,
+read-only tools, finder/verifier loop, and structured results.
+
+Select model slugs from `auth models --provider codex` in your user configuration:
+
+```yaml
+version: 1
+inference_profiles:
+  codex:
+    auth: codex
+    account: default
+    protocol: responses
+    model: your-codex-model-slug
+roles:
+  finder:
+    profile: codex
+  verifier:
+    profile: codex
+```
+
+Then run `roast doctor` or `roast review` normally. Use separate profiles/model
+slugs for the finder and verifier if desired. `auth: codex` selects only
+`https://chatgpt.com/backend-api/codex`; it cannot be combined with an API key or
+redirected to `api.openai.com`, a gateway, or another protocol. Ambient OpenAI
+API keys and base URLs are ignored. Conflicting role overrides fail closed.
+
+- Pass `--provider codex` to **all** Codex account commands, including
+  `roast auth logout --provider codex`. Without `--provider`, auth commands retain
+  their existing `chatgpt` (newer app plan-sharing) behavior. There is no automatic
+  fallback between these providers.
+- The callback URI is fixed at `http://localhost:1455/auth/callback`, with a
+  listener bound to IPv4 loopback only. Port 1455 must be available; finish other
+  Codex/Pi login attempts first. `--no-browser` prints the URL for manual opening
+  and does not change the callback URI or make a remote listener locally reachable.
+- Accounts, rotating refresh tokens, and workspace identifiers are stored under
+  `roast/auth/codex` in your platform user configuration directory, separately from
+  `roast/auth/chatgpt`. Existing SIWC registrations and Albedo/Pi/Codex credential
+  files are never imported, overwritten, or used implicitly. Sign in once for
+  Roast; use `--account personal` with `account: personal` for a named account.
+- Refreshes are serialized across processes. Access tokens and workspace IDs are
+  obtained together from the same account; returning login or refresh cannot
+  silently change the stored identity/workspace. Use another account label for
+  a different identity or workspace.
+- Logout revokes the session if the trusted discovery document advertises a
+  revocation endpoint, then clears local tokens. A revocation failure retains the
+  credentials for retry. If no revocation endpoint is advertised, Codex logout
+  clears local tokens only; it does not claim to revoke a remote session.
+- This is the legacy Codex client protocol, not OpenAI's newer third-party
+  plan-sharing contract. OpenAI can change it; eligible models, subscription
+  limits, and any Codex-specific workspace policies still apply. It does not
+  bypass a workspace's Codex access policy. Model discovery advertises client
+  protocol version `0.162.1`, so a future model requiring a newer version may
+  require a Roast update.
+- Like the newer subscription route, Codex does not accept a server-enforced
+  `max_output_tokens` cap. Roast retains local reservations, usage accounting,
+  turn limits, and deadlines; a response may exceed its reservation.
+
+## ChatGPT subscription (app plan sharing)
+
+Eligible ChatGPT Plus and Pro users can authorize Roast to use their subscription
+through OpenAI's [Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source).
+This is a direct Responses API integration: Roast still controls the prompts,
+read-only tools, finder/verifier conversations, and structured findings. It does
+not run Codex or read Codex's credentials. This preview is intended for locally
+run open-source tools; eligibility, model availability, and usage limits are
+controlled by OpenAI.
+
+First sign in and list the models available to your account:
+
+```sh
+roast auth login
+roast auth status
+roast auth models
+```
+
+`auth login` opens your system browser and listens on `127.0.0.1` for the OAuth
+callback. Use `--no-browser` to open the printed URL yourself, and `--timeout 10m`
+to change the default five-minute sign-in timeout. The browser must be able to
+reach the loopback listener on the machine running Roast. `auth status --json`
+and `auth models --json` provide machine-readable, non-secret output.
+
+In your user-owned `roast/config.yaml`, select a model slug from `auth models`:
+
+```yaml
+version: 1
+inference_profiles:
+  subscription:
+    auth: chatgpt
+    account: default
+    protocol: responses
+    model: your-account-model-slug
+    max_output_tokens: 32768
+roles:
+  finder:
+    profile: subscription
+  verifier:
+    profile: subscription
+```
+
+Then run `roast doctor` and `roast review` normally. Finder and verifier may use
+separate profiles, models, and auth modes; an API-key-backed Claude verifier can
+be paired with a ChatGPT-backed finder, for example. This does **not** enable
+Claude subscription authentication.
+
+- `auth` defaults to the existing API-key behavior (`api_key`). `chatgpt` is
+  explicit and supports only `protocol: responses` at
+  `https://api.openai.com/v1`. It cannot be combined with `api_key` or
+  `api_key_env`. Ambient `OPENAI_API_KEY` and `OPENAI_BASE_URL` are ignored for
+  subscription profiles. Incompatible role keys, endpoint/protocol environment
+  overrides, and endpoint/protocol flags are rejected rather than falling back
+  to another credential or sending tokens to a gateway.
+- `account` is a local label, defaulting to `default`. Use
+  `roast auth login --account personal` and `account: personal` for a separate
+  registration. Labels contain 1–64 letters, digits, hyphens, or underscores,
+  starting with a letter or digit. Returning login preserves the registered
+  account and workspace; use another label to add a different account.
+- OAuth credentials are stored separately from configuration and run artifacts,
+  under `roast/auth/chatgpt` in the platform's user configuration directory.
+  Treat this directory like a password: it contains access, refresh, and ID
+  tokens. Do not commit or share it. Tokens refresh automatically, with account
+  locking to serialize refreshes across concurrent reviews.
+- `roast auth logout [--account personal]` revokes the renewable session before
+  clearing its local tokens. If revocation fails, credentials are retained so
+  logout can be retried; you can also disconnect Roast in ChatGPT Settings.
+  The local registration and stable host identifier are retained for later
+  sign-in.
+- Subscription requests require streaming and `store: false`; Roast replays its
+  conversation history itself. OpenAI's current subscription route does **not**
+  accept `max_output_tokens`, so that setting is a local budget reservation,
+  not a server-enforced output cap. Token accounting, turn limits, and deadlines
+  still apply, but a single response can exceed its reservation. `roast doctor`
+  reports this limitation. ChatGPT plan/app usage limits apply independently;
+  Plus usage is shared across participating apps. See ChatGPT Settings → Usage
+  to manage app limits and access.
+
 ## Configure
 
 ### Environment variables

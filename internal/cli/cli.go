@@ -80,7 +80,7 @@ func ErrorCategoryFor(code int, err error) ErrorCategory {
 		return ErrorAuth
 	case errors.Is(err, llm.ErrEndpoint):
 		return ErrorEndpoint
-	case errors.Is(err, llm.ErrBudgetExhausted), errors.Is(err, llm.ErrWorkDeadline), errors.Is(err, llm.ErrNoFinalCall):
+	case errors.Is(err, llm.ErrBudgetExhausted), errors.Is(err, llm.ErrWorkDeadline), errors.Is(err, llm.ErrNoFinalCall), errors.Is(err, llm.ErrUsageLimit):
 		return ErrorResource
 	}
 	var usage *usageError
@@ -275,6 +275,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newConfigCommand(stdout, stderr))
 	root.AddCommand(newSkillCommand(stdout))
 	root.AddCommand(newDoctorCommand(stdout))
+	root.AddCommand(newAuthCommand(stdout, stderr))
 	return root
 }
 
@@ -492,10 +493,20 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	if err := config.ValidateRole("finder", finderRole); err != nil {
 		return &usageError{msg: err.Error()}
 	}
+	if config.IsOAuth(finderRole.Auth) {
+		if err := subscriptionPreflight(ctx, finderRole); err != nil {
+			return err
+		}
+	}
 	doVerify := !f.quick && !f.noVerify
 	if doVerify {
 		if err := config.ValidateRole("verifier", verifierRole); err != nil {
 			return &usageError{msg: err.Error()}
+		}
+		if config.IsOAuth(verifierRole.Auth) {
+			if err := subscriptionPreflight(ctx, verifierRole); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1033,13 +1044,23 @@ func applyRoleFlags(changed func(string) bool, name string, role config.Resolved
 }
 
 func clientConfig(roleName string, role config.ResolvedRole, ledger *llm.Ledger, capture func(llm.RawResponse) error, maxAttempts int, requestTimeout time.Duration) llm.ClientConfig {
-	return llm.ClientConfig{
+	cfg := llm.ClientConfig{
 		Role:    roleName,
 		BaseURL: strings.TrimRight(role.BaseURL, "/"), APIKey: role.APIKey,
 		Model: role.Model, Protocol: role.Protocol, MaxOutputTokens: role.MaxOutputTokens,
 		MaxAttempts: maxAttempts, RequestTimeout: requestTimeout,
 		Ledger: ledger, CaptureResponse: capture,
 	}
+	if role.Auth == config.AuthChatGPT {
+		cfg.ChatGPT = true
+		cfg.APIKey = ""
+		cfg.TokenSource = chatGPTTokenSource(role.Account)
+	} else if role.Auth == config.AuthCodex {
+		cfg.Codex = true
+		cfg.APIKey = ""
+		cfg.CodexTokenSource = codexTokenSource(role.Account)
+	}
+	return cfg
 }
 
 func resolveLangs(in, files []string, mode string) ([]string, error) {

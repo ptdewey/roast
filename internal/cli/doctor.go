@@ -114,7 +114,11 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			role = flip.Role
 		}
 		credential := doctorResult{name + "-credential", doctorPass, role.Credential.String()}
-		if strings.TrimSpace(role.APIKey) == "" {
+		if config.IsOAuth(role.Auth) {
+			if err := subscriptionPreflight(ctx, role); err != nil {
+				credential.Status, credential.Detail = doctorFail, err.Error()
+			}
+		} else if strings.TrimSpace(role.APIKey) == "" {
 			credential.Status = doctorFail
 		}
 		results = append(results, credential)
@@ -122,10 +126,16 @@ func doctorChecks(ctx context.Context, configPath string) []doctorResult {
 			results = append(results, doctorResult{name + "-profile", doctorFail, validateErr.Error()})
 			continue
 		}
+		if config.IsOAuth(role.Auth) && credential.Status == doctorFail {
+			continue
+		}
 		results = append(results, doctorResult{
 			Name: name + "-profile", Status: doctorPass,
 			Detail: fmt.Sprintf("%s: %s via %s at %s with credential %s", role.Profile, role.Model, role.Protocol, role.BaseURL, role.Credential),
 		})
+		if config.IsOAuth(role.Auth) {
+			results = append(results, doctorResult{name + "-output-budget", doctorWarn, "OpenAI subscription requests do not support a server-enforced max_output_tokens cap; local token reservations and deadlines still apply"})
+		}
 		results = append(results, doctorEndpointCheck(ctx, client, name, role))
 		results = append(results, doctorRoundtripCheck(ctx, name, role))
 	}
@@ -147,11 +157,8 @@ func doctorRoundtripCheck(ctx context.Context, name string, role config.Resolved
 	}
 	probeContext, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	client, err := llm.New(probeContext, llm.ClientConfig{
-		Role: name, BaseURL: role.BaseURL, APIKey: role.APIKey, Model: role.Model,
-		Protocol: role.Protocol, MaxOutputTokens: maxOutputTokens,
-		MaxAttempts: 1, RequestTimeout: 15 * time.Second,
-	})
+	role.MaxOutputTokens = maxOutputTokens
+	client, err := llm.New(probeContext, clientConfig(name, role, nil, nil, 1, 15*time.Second))
 	if err != nil {
 		return doctorResult{name + "-roundtrip", doctorFail, err.Error()}
 	}
@@ -190,6 +197,35 @@ func doctorBuildCheck() doctorResult {
 }
 
 func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, role config.ResolvedRole) doctorResult {
+	if role.Auth == config.AuthCodex {
+		if err := config.ValidateRole(name, role); err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		token, workspace, err := codexTokenSource(role.Account)(ctx)
+		if err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		catalog, err := listCodexModels(ctx, client, token, workspace)
+		if err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		return doctorResult{name + "-endpoint", doctorPass, fmt.Sprintf("Codex model catalog reachable (%d available models)", len(catalog))}
+	}
+	token := role.APIKey
+	if role.Auth == config.AuthChatGPT {
+		if err := config.ValidateRole(name, role); err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		var err error
+		token, err = chatGPTTokenSource(role.Account)(ctx)
+		if err != nil {
+			return doctorResult{name + "-endpoint", doctorFail, err.Error()}
+		}
+		// Even redirects to a sibling subdomain must not receive OAuth tokens.
+		copy := *client
+		copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &copy
+	}
 	endpoint := strings.TrimRight(role.BaseURL, "/") + "/models"
 	if _, err := url.ParseRequestURI(endpoint); err != nil {
 		return doctorResult{name + "-endpoint", doctorFail, "invalid models endpoint: " + err.Error()}
@@ -204,7 +240,7 @@ func doctorEndpointCheck(ctx context.Context, client *http.Client, name string, 
 		req.Header.Set("x-api-key", role.APIKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	} else {
-		req.Header.Set("Authorization", "Bearer "+role.APIKey)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

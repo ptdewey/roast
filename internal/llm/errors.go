@@ -16,5 +16,9 @@ var ErrWorkDeadline = errors.New("llm: work deadline reached")
 // ErrAuth wraps 401/403 from an inference endpoint.
 var ErrAuth = errors.New("llm: authentication failed")
 
+// ErrUsageLimit marks a provider-declared OpenAI subscription usage limit, not an
+// authentication failure or the local token reservation budget.
+var ErrUsageLimit = errors.New("llm: OpenAI subscription usage limit reached")
+
 // ErrEndpoint marks a non-auth inference HTTP or transport failure.
 var ErrEndpoint = errors.New("llm: inference endpoint failure")

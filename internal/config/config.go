@@ -36,6 +36,9 @@ func DefaultBaseURL(protocol string) string {
 // InferenceProfile is one named model, endpoint, protocol, and credential
 // source. Profiles live only in user-owned config, never repository config.
 type InferenceProfile struct {
+	// Auth is empty/api_key for existing profiles, or chatgpt/codex for subscription OAuth.
+	Auth            string `yaml:"auth,omitempty"`
+	Account         string `yaml:"account,omitempty"`
 	BaseURL         string `yaml:"endpoint"`
 	APIKey          string `yaml:"api_key"`
 	APIKeyEnv       string `yaml:"api_key_env"`
@@ -58,6 +61,8 @@ type Role struct {
 // ResolvedRole is the complete, runtime-ready role. APIKey is secret and must
 // never be copied into run metadata.
 type ResolvedRole struct {
+	Auth            string
+	Account         string
 	Profile         string
 	BaseURL         string
 	APIKey          string
@@ -81,12 +86,16 @@ const (
 	CredentialProfileKey  = "profile_api_key"
 	CredentialProviderEnv = "provider_env"
 	CredentialNone        = "none"
+	CredentialChatGPT     = "chatgpt_oauth"
+	CredentialCodex       = "codex_oauth"
 )
 
 // CredentialSource describes where a role's credential came from without
 // carrying its value.
 type CredentialSource struct {
 	Kind string
+	// Account is a local account label, never an OAuth token.
+	Account string
 	// Env is the environment variable read for an environment-backed kind.
 	Env string
 	// Withheld names an ambient provider key that was set but not sent,
@@ -96,6 +105,10 @@ type CredentialSource struct {
 
 func (s CredentialSource) String() string {
 	switch s.Kind {
+	case CredentialChatGPT:
+		return "ChatGPT OAuth (account " + s.Account + ")"
+	case CredentialCodex:
+		return "Codex OAuth (account " + s.Account + ")"
 	case CredentialRoleEnv:
 		return s.Env + " (role override)"
 	case CredentialProfileEnv:
@@ -500,6 +513,9 @@ func normalizeProfile(name string, profile InferenceProfile) (InferenceProfile, 
 	if profile.MaxOutputTokens == 0 {
 		profile.MaxOutputTokens = 32768
 	}
+	if err := validateProfileAuth(name, &profile); err != nil {
+		return InferenceProfile{}, err
+	}
 	if profile.APIKey != "" && profile.APIKeyEnv != "" {
 		return InferenceProfile{}, fmt.Errorf("inference_profiles.%s cannot set both api_key and api_key_env", name)
 	}
@@ -518,12 +534,18 @@ func (p InferenceProfile) Endpoint() string {
 	if p.BaseURL != "" {
 		return p.BaseURL
 	}
+	if IsOAuth(p.Auth) {
+		return OAuthBaseURL(p.Auth)
+	}
 	return DefaultBaseURL(p.Protocol)
 }
 
 // DescribeEndpoint states where the profile sends requests, including the
 // ambient base URL that replaces an unset endpoint.
 func (p InferenceProfile) DescribeEndpoint() string {
+	if IsOAuth(p.Auth) {
+		return OAuthBaseURL(p.Auth) + " (" + p.Auth + " subscription)"
+	}
 	if p.BaseURL != "" {
 		return p.BaseURL
 	}
@@ -533,6 +555,9 @@ func (p InferenceProfile) DescribeEndpoint() string {
 // DescribeCredential states, without resolving any secret, where the profile
 // obtains its credential when selected for role.
 func (p InferenceProfile) DescribeCredential(role string) string {
+	if IsOAuth(p.Auth) {
+		return oauthCredential(p.Auth, p.Account).String()
+	}
 	roleVar := roleEnvPrefix(role) + "API_KEY"
 	keyVar := providerAPIKeyEnv(p.Protocol)
 	switch {
@@ -574,17 +599,33 @@ func (c Config) resolveProfile(roleName, profileName string, selection Role) (Re
 	}
 	role := ResolvedRole{
 		Profile: profileName, BaseURL: profile.BaseURL, ExplicitEndpoint: profile.BaseURL != "",
+		Auth: profile.Auth, Account: profile.Account,
 		Model: profile.Model, Protocol: profile.Protocol, MaxOutputTokens: profile.MaxOutputTokens,
 		Pin: selection.Pin, AuthorRoutes: selection.AuthorRoutes,
 	}
 	if !role.ExplicitEndpoint {
-		role.BaseURL = implicitEndpoint(role.Protocol)
+		if IsOAuth(role.Auth) {
+			role.BaseURL = OAuthBaseURL(role.Auth)
+		} else {
+			role.BaseURL = implicitEndpoint(role.Protocol)
+		}
 	}
 	crossedProvider, err := applyRoleEnv(roleName, &role)
 	if err != nil {
 		return ResolvedRole{}, err
 	}
-	role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
+	if IsOAuth(role.Auth) {
+		role.Account = chatGPTAccount(role.Account)
+		role.Credential = oauthCredential(role.Auth, role.Account)
+		if os.Getenv(roleEnvPrefix(roleName)+"API_KEY") != "" {
+			return ResolvedRole{}, fmt.Errorf("%sAPI_KEY cannot be combined with auth: %s", roleEnvPrefix(roleName), role.Auth)
+		}
+		if err := validateOAuthRoute(role); err != nil {
+			return ResolvedRole{}, err
+		}
+	} else {
+		role.APIKey, role.Credential = resolveCredential(roleName, profile, role, crossedProvider)
+	}
 	return role, nil
 }
 
@@ -701,6 +742,12 @@ func OverrideEndpoint(roleName string, role ResolvedRole, baseURL, protocol *str
 // against the new endpoint and protocol. When crossedProvider is true, the
 // profile's credential stays with the provider it was configured for.
 func rebindCredential(roleName string, role ResolvedRole, crossedProvider bool) ResolvedRole {
+	// Subscription credentials can never become ambient API keys after an
+	// endpoint/protocol flag. ValidateRole rejects the incompatible route.
+	if IsOAuth(role.Auth) {
+		role.APIKey = ""
+		return role
+	}
 	switch role.Credential.Kind {
 	case CredentialRoleEnv:
 		return role
@@ -856,6 +903,15 @@ func (c Config) ResolveFinderFlip(finder ResolvedRole, authorModel string) (Flip
 func ValidateRole(name string, role ResolvedRole) error {
 	if strings.TrimSpace(role.Model) == "" {
 		return fmt.Errorf("%s model is not configured (set inference_profiles.%s.model or ROAST_%s_MODEL)", name, role.Profile, strings.ToUpper(name))
+	}
+	if IsOAuth(role.Auth) {
+		if err := validateOAuthRoute(role); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return validateEndpoint(name, role.BaseURL, role.Protocol, role.MaxOutputTokens)
+	}
+	if role.Auth != "" && role.Auth != AuthAPIKey {
+		return fmt.Errorf("%s auth must be api_key, chatgpt, or codex", name)
 	}
 	if strings.TrimSpace(role.APIKey) == "" {
 		roleVar := roleEnvPrefix(name) + "API_KEY"

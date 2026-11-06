@@ -30,16 +30,23 @@ const (
 
 // ClientConfig configures one finder or verifier model.
 type ClientConfig struct {
-	Role            string
-	BaseURL         string
-	APIKey          string
-	Model           string
-	MaxOutputTokens int
-	MaxAttempts     int
-	RequestTimeout  time.Duration
-	Protocol        string
-	Ledger          *Ledger
-	CaptureResponse func(RawResponse) error
+	Role    string
+	BaseURL string
+	APIKey  string
+	// ChatGPT (SIWC) and Codex (direct subscription OAuth) are mutually exclusive.
+	// Neither mode uses APIKey or ambient credentials; Codex credentials are fetched
+	// coherently as a token/workspace pair immediately before each guarded request.
+	ChatGPT          bool
+	Codex            bool
+	CodexTokenSource func(context.Context) (token string, accountID string, err error)
+	TokenSource      func(context.Context) (string, error)
+	Model            string
+	MaxOutputTokens  int
+	MaxAttempts      int
+	RequestTimeout   time.Duration
+	Protocol         string
+	Ledger           *Ledger
+	CaptureResponse  func(RawResponse) error
 }
 
 // RawResponse is a provider HTTP response body without requests or headers.
@@ -65,10 +72,30 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	if cfg.MaxOutputTokens <= 0 {
 		return nil, fmt.Errorf("%s: max output tokens must be positive", cfg.Model)
 	}
-	if strings.TrimSpace(cfg.APIKey) == "" {
+	if cfg.ChatGPT && cfg.Codex {
+		return nil, fmt.Errorf("ChatGPT and Codex authentication are mutually exclusive")
+	}
+	if !cfg.ChatGPT && cfg.TokenSource != nil || !cfg.Codex && cfg.CodexTokenSource != nil {
+		return nil, fmt.Errorf("subscription token source does not match authentication mode")
+	}
+	if cfg.Codex {
+		if err := validateCodexConfig(cfg); err != nil {
+			return nil, err
+		}
+	} else if cfg.ChatGPT {
+		if err := validateChatGPTConfig(cfg); err != nil {
+			return nil, err
+		}
+	} else if strings.TrimSpace(cfg.APIKey) == "" {
 		// Fantasy omits an empty key, and the SDKs then fall back to ambient
 		// credentials: environment variables, profile files, or federation.
 		return nil, fmt.Errorf("%s: API key is not configured", cfg.Model)
+	}
+	sdkKey := cfg.APIKey
+	if cfg.ChatGPT || cfg.Codex {
+		// A non-secret placeholder prevents SDK fallback to ambient credentials.
+		// The guarded transport always replaces it immediately before sending.
+		sdkKey = "roast-chatgpt-dynamic-auth"
 	}
 	envHeaders := sdkEnvironmentHeaders(cfg.Protocol)
 	httpClient := providerHTTPClient(cfg, envHeaders)
@@ -87,7 +114,7 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 		)
 	case "responses":
 		provider, err = fantasyopenai.New(
-			fantasyopenai.WithAPIKey(cfg.APIKey),
+			fantasyopenai.WithAPIKey(sdkKey),
 			fantasyopenai.WithBaseURL(cfg.BaseURL),
 			fantasyopenai.WithHTTPClient(httpClient),
 			fantasyopenai.WithUserAgent(userAgent()),
@@ -114,6 +141,9 @@ func New(ctx context.Context, cfg ClientConfig) (Client, error) {
 	mdl, err := provider.LanguageModel(ctx, cfg.Model)
 	if err != nil {
 		return nil, fmt.Errorf("initialize %s model %q: %w", protocolName(cfg), cfg.Model, err)
+	}
+	if cfg.ChatGPT || cfg.Codex {
+		mdl = &chatGPTModel{LanguageModel: mdl, codex: cfg.Codex}
 	}
 	return &client{cfg: cfg, model: mdl, transport: httpClient.Transport.(*captureTransport)}, nil
 }
@@ -320,9 +350,16 @@ func (b *streamCaptureBody) Close() error {
 }
 
 func providerHTTPClient(cfg ClientConfig, envHeaders []string) *http.Client {
-	transport := &captureTransport{base: http.DefaultTransport, cfg: cfg}
+	var base http.RoundTripper = http.DefaultTransport
+	if cfg.ChatGPT {
+		base = &chatGPTTransport{base: base, token: cfg.TokenSource}
+	}
+	if cfg.Codex {
+		base = &codexTransport{chatGPTTransport{base: base, codex: true, credentials: cfg.CodexTokenSource}}
+	}
+	transport := &captureTransport{base: base, cfg: cfg}
 	client := &http.Client{Transport: transport}
-	if cfg.Protocol == "anthropic" {
+	if cfg.Protocol == "anthropic" || cfg.ChatGPT || cfg.Codex {
 		transport.stripHeaders = envHeaders
 		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -341,7 +378,7 @@ func normalizeProviderError(ctx context.Context, modelName string, err error) er
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %s: %w", ErrEndpoint, modelName, err)
 	}
-	if errors.Is(err, ErrAuth) || errors.Is(err, ErrEndpoint) || errors.Is(err, ErrBudgetExhausted) {
+	if errors.Is(err, ErrAuth) || errors.Is(err, ErrEndpoint) || errors.Is(err, ErrBudgetExhausted) || errors.Is(err, ErrUsageLimit) {
 		return err
 	}
 	if status, ok := errorStatus(err); ok && (status == http.StatusUnauthorized || status == http.StatusForbidden) {

@@ -220,7 +220,7 @@ func PlanProvision(ctx context.Context, sourceURL, path, legacyPath string) (*Pr
 			}
 			if legacy.Gateway.APIKey != "" && cfg.Provisioning != nil && cfg.Provisioning.ImportLegacyCredential {
 				for name, profile := range cfg.InferenceProfiles {
-					if profile.APIKey == "" && profile.APIKeyEnv == "" {
+					if !IsOAuth(profile.Auth) && profile.APIKey == "" && profile.APIKeyEnv == "" {
 						profile.APIKey = legacy.Gateway.APIKey
 						cfg.InferenceProfiles[name] = profile
 					}

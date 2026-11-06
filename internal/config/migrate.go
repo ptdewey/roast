@@ -156,7 +156,10 @@ func nestedMappingHasAnyKey(mapping *yaml.Node, keys ...string) bool {
 func migrateDraft(draft draftConfig) Config {
 	profiles := make(map[string]InferenceProfile, len(draft.InferenceProfiles))
 	for name, profile := range draft.InferenceProfiles {
-		profiles[name] = InferenceProfile(profile)
+		profiles[name] = InferenceProfile{
+			BaseURL: profile.BaseURL, APIKey: profile.APIKey, APIKeyEnv: profile.APIKeyEnv,
+			Model: profile.Model, Protocol: profile.Protocol, MaxOutputTokens: profile.MaxOutputTokens,
+		}
 	}
 	return Config{
 		Version: CurrentVersion, InferenceProfiles: profiles, Roles: draft.Roles,
