@@ -485,6 +485,10 @@ func ExplorationTools(repo string, tree Tree) []llm.Tool {
 		readCorpus = "This review covers STAGED content, so this reads the git index blob — exactly what the commit would contain — NOT the working tree: unstaged edits and untracked files are invisible here, and a path staged for deletion reads as absent from the index."
 		grepCorpus = "Search the git INDEX of this checkout for a pattern — exactly the content the review covers. Unstaged edits and untracked files are NOT searched."
 		listCorpus = "Lists regular files in the captured git INDEX, not the live working tree."
+	} else if tree.Revision {
+		readCorpus = "Reads the immutable selected revision, not the live checkout."
+		grepCorpus = "Search the immutable selected revision, not the live checkout."
+		listCorpus = "Lists regular files in the immutable selected revision, not the live checkout."
 	} else if tree.Pinned() {
 		readCorpus = "Reads the immutable captured worktree used by this run, not later checkout edits."
 		grepCorpus = "Search the immutable captured worktree used by this run, including captured non-ignored untracked files."
@@ -1315,6 +1319,8 @@ func noGrepMatches(pattern, pathGlob string, tree Tree) map[string]any {
 	if tree.Staged() {
 		searched = "the git INDEX of this checkout — the staged content this review covers, NOT the working tree"
 		blindTo = "unstaged working-tree edits, untracked files, "
+	} else if tree.Revision {
+		searched = "the immutable selected revision used by this run"
 	} else if tree.Pinned() {
 		searched = "the immutable captured worktree used by this run"
 	}

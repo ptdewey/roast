@@ -39,13 +39,25 @@ install it without recorded consent. The gate is managed explicitly with
 Review coherent, non-trivial changes such as features, refactors, concurrency,
 protocol changes, and important bug fixes. Skip formatting-only changes and
 minor documentation corrections. Review before committing with `--staged`, or
-use `--base <ref>` when the work is already committed.
+use `--revision <rev>` to review one specific committed change, or `--base <ref>`
+for the existing cumulative review since a base.
+
+When the operator names a revision, pass it verbatim as `--revision <rev>`;
+`--task` is descriptive text, not revision selection. Roast automatically uses
+jj revsets inside colocated Git-backed jj workspaces and Git refs elsewhere.
+For a request to review the current jj change, use `--revision @`. Do not
+substitute the latest described
+change, Git HEAD, or another revision. If resolution fails or is ambiguous,
+report that and ask for clarification rather than running a different review.
+Both diff and file context are pinned to the selected revision. Merge commits
+are compared with their first parent; initial commits with the empty tree.
 
 ## Invocations
 
 ```sh
 roast review --task "what changed and why"
 roast review --staged --task "what changed and why"
+roast review --revision <rev> --task "what changed and why"
 roast review --quick --task "draft review"
 roast review --interactive --task "review with repository navigation"
 roast review --scope repo --task "survey this repository"

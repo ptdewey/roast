@@ -46,6 +46,7 @@ type BuildMeta struct {
 type ScopeMeta struct {
 	Kind            string   `json:"kind"`
 	Base            string   `json:"base,omitempty"`
+	Revision        string   `json:"revision,omitempty"`
 	UncommittedOnly bool     `json:"uncommitted_only,omitempty"`
 	StagedOnly      bool     `json:"staged_only,omitempty"`
 	IncludeVendored bool     `json:"include_vendored,omitempty"`

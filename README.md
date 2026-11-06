@@ -376,6 +376,7 @@ Run Roast inside a Git repository:
 ```sh
 roast review --task 'add retry handling'   # review the current changes
 roast review --staged --max-severity HIGH  # staged changes; exit 1 on HIGH+
+roast review --revision <rev>              # exactly one Git commit or jj revision
 roast review --interactive                 # let the finder navigate the repo
 roast review --quick                       # finder only, no verification
 roast review --scope repo                  # survey the whole repository
@@ -390,6 +391,20 @@ plus uncommitted and untracked changes. Untracked files that look like secrets
 (`.env*`, `*.pem`, `*.key`, SSH keys such as `id_ed25519*`, and similar) are
 skipped with a note on stderr. JSON goes to stdout and Markdown to stderr;
 `--format` selects one.
+
+`--revision <rev>` reviews only the selected commit against its first parent
+(or the empty tree for an initial commit), without including other checkout,
+index, or untracked changes. In a jj workspace, `<rev>` is a jj revset that must
+resolve to exactly one revision; elsewhere it is a Git commit ref. Roast prints
+the resolved commit ID and pins all review context to that revision. Invalid or
+ambiguous targets fail rather than falling back to another revision. This
+requires a Git repository, or a colocated Git-backed jj workspace with `jj` on
+PATH. Non-colocated jj workspaces are rejected explicitly. `--revision @`
+snapshots and reviews the current jj change, including its latest edits. Clear
+custom Git routing variables (such as `GIT_INDEX_FILE`) before using `--revision`;
+these overrides are rejected to protect the live repository during isolation.
+`--revision` cannot be combined with `--base`, `--staged`,
+`--uncommitted-only`, or `--scope repo`. Without it, scope selection is unchanged.
 
 `--interactive` gives the finder several turns with the navigation tools. Small
 diffs (under 80 lines and 4 files) get a single structured call instead, and

@@ -16,10 +16,12 @@ import (
 type Tree struct {
 	// OID is the pinned tree object. Empty means the live working tree.
 	OID string
-	// Worktree distinguishes a captured worktree tree from the pinned index
-	// used by staged reviews. For compatibility, a non-empty OID with this
+	// Worktree distinguishes a captured checkout or selected revision from
+	// the pinned index used by staged reviews. For compatibility, a non-empty OID with this
 	// false is the index corpus.
 	Worktree bool
+	// Revision identifies a selected historical commit rather than a captured checkout.
+	Revision bool
 }
 
 // Pinned reports whether t names immutable Git tree content.
@@ -35,6 +37,11 @@ func (t Tree) Staged() bool {
 // PinnedWorktree returns an immutable captured-worktree corpus.
 func PinnedWorktree(oid string) Tree {
 	return Tree{OID: oid, Worktree: oid != ""}
+}
+
+// PinnedRevision returns the immutable corpus of an explicitly selected commit.
+func PinnedRevision(oid string) Tree {
+	return Tree{OID: oid, Worktree: oid != "", Revision: oid != ""}
 }
 
 // PinIndexTree snapshots the CURRENT index into an immutable tree object and

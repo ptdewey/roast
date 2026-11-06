@@ -79,6 +79,9 @@ type Scope struct {
 	// against the exact same OID Build itself diffed against.
 	StagedTreeOID string
 
+	// RevisionTreeOID pins all context reads for an explicitly selected commit.
+	RevisionTreeOID string
+
 	// Survey-mode fields (Scope == "branch" or "repo"). Diff stays empty;
 	// Manifest carries the small map handed to the finder instead. BaseOID/
 	// MergeBaseOID/HeadOID are the immutable snapshot identity — rev-parse of
@@ -105,6 +108,7 @@ func (s *Scope) Empty() bool {
 
 // BuildOpts controls what Build produces.
 type BuildOpts struct {
+	Revision        string   // exactly one commit/revset target, diffed against its first parent
 	Base            string   // explicit base ref; empty = try BaseCandidates (diff scope) or the remote default branch (branch scope)
 	UncommittedOnly bool     // skip committed-since-base; uncommitted + untracked only (diff scope)
 	StagedOnly      bool     // exactly the staged set (git diff --cached) (diff scope)
@@ -136,6 +140,9 @@ type BuildOpts struct {
 // commit would contain — with no untracked synthesis and no working-tree
 // noise; this is the pre-commit gate's scope.
 func Build(repo string, opts BuildOpts) (Scope, error) {
+	if opts.Revision != "" {
+		return buildRevision(repo, opts)
+	}
 	var notes []string
 	maxSection := opts.MaxFileDiffBytes
 	if maxSection <= 0 {

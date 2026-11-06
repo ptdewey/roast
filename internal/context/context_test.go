@@ -809,6 +809,7 @@ func TestExplorationToolDescriptionsDiscloseTheirTree(t *testing.T) {
 	}{
 		{Tree{OID: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}, "index"},
 		{PinnedWorktree("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"), "captured worktree"},
+		{PinnedRevision("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"), "selected revision"},
 		{Tree{}, "working tree"},
 	} {
 		for _, tool := range ExplorationTools(t.TempDir(), tc.tree) {

@@ -129,6 +129,7 @@ var gateBootstrapCommands = map[string]bool{"roast": true, "review": true}
 type reviewFlags struct {
 	configPath      string
 	base            string
+	revision        string
 	uncommittedOnly bool
 	staged          bool
 	task            string
@@ -231,7 +232,7 @@ func newRootCommand(stdout, stderr io.Writer) *cobra.Command {
 		SilenceErrors: true,
 		Args:          noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := scope.GitRoot("."); err != nil {
+			if _, err := scope.GitRoot("."); err != nil && !cmd.Flags().Changed("revision") {
 				fmt.Fprintln(stderr, "roast: not in a Git repository; cd into one to review, or try `roast doctor` / `roast --help`")
 				if helpErr := cmd.Help(); helpErr != nil {
 					return helpErr
@@ -353,6 +354,7 @@ func addReviewFlags(cmd *cobra.Command, f *reviewFlags) {
 	fl := cmd.Flags()
 	fl.StringVar(&f.configPath, "config", "", "config file (default: user config directory/roast/config.yaml)")
 	fl.StringVar(&f.base, "base", "", "diff base ref (default: origin/main with fallbacks)")
+	fl.StringVar(&f.revision, "revision", "", "review exactly one revision (jj revset in a jj workspace, Git ref otherwise)")
 	fl.BoolVar(&f.uncommittedOnly, "uncommitted-only", false, "only review uncommitted changes")
 	fl.BoolVar(&f.staged, "staged", false, "review exactly the staged set")
 	fl.StringVar(&f.task, "task", "(not provided)", "what the builder was asked to do")
@@ -410,6 +412,14 @@ func runReview(cmd *cobra.Command, f *reviewFlags, stdout, stderr io.Writer) err
 }
 
 func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewFlags, stdout, stderr io.Writer) error {
+	if changed("revision") {
+		if strings.TrimSpace(f.revision) == "" {
+			return &usageError{msg: "--revision must not be empty"}
+		}
+		if changed("base") || changed("staged") || changed("uncommitted-only") || f.scope != "diff" {
+			return &usageError{msg: "--revision cannot be combined with --base, --staged, --uncommitted-only, or --scope repo"}
+		}
+	}
 	if f.staged && f.uncommittedOnly {
 		return &usageError{msg: "--staged and --uncommitted-only cannot be combined"}
 	}
@@ -511,6 +521,9 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	}
 
 	repo, err := scope.GitRoot(".")
+	if f.revision != "" {
+		repo, err = scope.RepositoryForRevision(".")
+	}
 	if err != nil {
 		return &usageError{msg: err.Error()}
 	}
@@ -525,6 +538,7 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	}
 	build := scope.BuildOpts{
 		Base:            f.base,
+		Revision:        f.revision,
 		UncommittedOnly: f.uncommittedOnly,
 		StagedOnly:      f.staged,
 		Paths:           f.paths,
@@ -545,6 +559,9 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	}
 	sc, err := scope.Build(repo, build)
 	if err != nil {
+		if f.revision != "" {
+			return &usageError{msg: err.Error()}
+		}
 		return err
 	}
 	for _, note := range sc.Notes {
@@ -567,7 +584,12 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 	// do readers fall back to the live tree, which context guards separately.
 	var pin snapshot.Pin
 	indexTree := tree.OID
-	if !sc.Staged {
+	if sc.RevisionTreeOID != "" {
+		// Historical reviews must never sample the live index or checkout.
+		tree = rcontext.PinnedRevision(sc.RevisionTreeOID)
+		indexTree = sc.RevisionTreeOID
+		pin = snapshot.Pin{Tree: sc.RevisionTreeOID}
+	} else if !sc.Staged {
 		var pinErr error
 		pin, pinErr = snapshot.PinWorktree(repo, nil)
 		if pinErr != nil {
@@ -728,7 +750,7 @@ func runReviewCommand(ctx context.Context, changed func(string) bool, f *reviewF
 		Argv:  append([]string(nil), os.Args[1:]...),
 		Roast: record.BuildMeta{Version: buildinfo.Version, Commit: buildinfo.Commit},
 		Scope: record.ScopeMeta{
-			Kind: f.scope, Base: sc.Base, UncommittedOnly: f.uncommittedOnly,
+			Kind: f.scope, Base: sc.Base, Revision: f.revision, UncommittedOnly: f.uncommittedOnly,
 			StagedOnly: f.staged, IncludeVendored: f.includeVendored,
 			Paths: append([]string(nil), f.paths...), Excludes: append([]string(nil), excludes...),
 			BaseOID: scopeBaseOID, MergeBaseOID: sc.MergeBaseOID, HeadOID: scopeHeadOID,
@@ -883,7 +905,12 @@ func captureSnapshot(repo, runID string, sc scope.Scope, indexTree string, pin s
 	if base == "" && sc.Base != "" {
 		base = snapshot.RevOID(repo, sc.Base)
 	}
-	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: base, IndexTree: indexTree, Worktree: pin})
+	snapshotBase := base
+	if sc.RevisionTreeOID != "" && snapshot.TreeOID(repo, base) == base {
+		// The empty tree is a diff baseline, not a commit parent.
+		snapshotBase = ""
+	}
+	snap, err := snapshot.Capture(repo, snapshot.Options{RunID: runID, HeadOID: head, BaseOID: snapshotBase, IndexTree: indexTree, Worktree: pin})
 	if err != nil {
 		return record.SnapshotMeta{Reason: err.Error(), Head: head, Base: base}, []string{"Git snapshot capture failed: " + err.Error()}
 	}
@@ -898,7 +925,7 @@ func captureSnapshot(repo, runID string, sc scope.Scope, indexTree string, pin s
 	meta := record.SnapshotMeta{
 		Captured: true, Ref: snap.Ref, Commit: snap.Commit,
 		IndexTree: snap.IndexTree, WorktreeTree: snap.WorktreeTree,
-		Head: snap.Head, Base: snap.Base, DiffPair: diffPair,
+		Head: snap.Head, Base: base, DiffPair: diffPair,
 		FileModes:     "regular and executable files plus symlinks; empty directories are not represented",
 		ExcludedPaths: append([]string(nil), snap.Excluded...),
 	}
